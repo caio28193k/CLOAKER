@@ -1,6 +1,11 @@
 {
   "name": "advanced-cloaker",
   "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check:config": "node scripts/check-config.cjs"
+  },
   "dependencies": {
     "node-fetch": "^2.6.7"
   }

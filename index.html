@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Loading...</title>
     <script>
         async function checkFingerprint() {
@@ -47,9 +48,19 @@
                 window.location.replace(`https://SEU-DOMINIO.vercel.app/api/cloak?ad_id=${adId}`);
             }
         }
-        window.onload = checkFingerprint;
+        window.addEventListener('load', () => {
+            checkFingerprint().catch(() => {
+                document.getElementById('status').textContent =
+                    'Não foi possível carregar a página. Atualize para tentar novamente.';
+            });
+        });
     </script>
 </head>
 <body>
+    <p id="status" role="status">Carregando...</p>
+    <noscript>
+        <style>#status { display: none; }</style>
+        <p>Esta página precisa de JavaScript para continuar.</p>
+    </noscript>
 </body>
 </html>

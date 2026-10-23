@@ -1,13 +1,16 @@
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
+import runtime from '../lib/runtime.cjs';
+
+const { validateConfig, lookupCountry } = runtime;
 
 export default async function handler(req, res) {
     // Carrega as configurações do arquivo config.json
     let config;
     try {
-        config = JSON.parse(
+        config = validateConfig(JSON.parse(
             fs.readFileSync(path.join(process.cwd(), 'config.json'), 'utf8')
-        );
+        ));
     } catch (e) {
         console.error('CONFIG_LOAD_ERROR', e);
         return res.status(500).send('Erro ao carregar configurações.');
@@ -25,27 +28,9 @@ export default async function handler(req, res) {
         return res.redirect(302, config.white_page);
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
-
+    const lookupStartedAt = Date.now();
     try {
-        const response = await fetch(`http://ip-api.com/json/${ip}`, {
-            signal: controller.signal
-        });
-
-        if (!response.ok) {
-            throw new Error(`Consulta de IP retornou HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        if (data.status !== 'success' || !data.countryCode) {
-            throw new Error(
-                `Resposta inválida da consulta de IP: ${data.message || 'sem país'}`
-            );
-        }
-
-        const countryCode = data.countryCode;
+        const countryCode = await lookupCountry(ip);
         const allowedCountries = ['MX', 'CL', 'CO', 'PE'];
 
         if (allowedCountries.includes(countryCode) && ad_id) {
@@ -60,14 +45,13 @@ export default async function handler(req, res) {
     } catch (error) {
         console.error('GEO_LOOKUP_FAILED', {
             name: error.name,
-            message: error.message
+            message: error.message,
+            duration_ms: Date.now() - lookupStartedAt
         });
 
         return res.status(503).send(
             'Consulta de localização temporariamente indisponível.'
         );
-    } finally {
-        clearTimeout(timer);
     }
 
     return res.redirect(302, config.white_page);
