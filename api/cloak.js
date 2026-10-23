@@ -6,9 +6,9 @@ export default async function handler(req, res) {
     try {
         config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
     } catch (e) {
+        console.error('CONFIG_LOAD_ERROR', e);
         return res.status(500).send("Erro ao carregar configurações.");
     }
-
     const { ad_id } = req.query;
     
     // Captura o IP do visitante
