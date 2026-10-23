@@ -5,263 +5,342 @@ import runtime from '../lib/runtime.cjs';
 
 const { validateConfig, lookupCountry } = runtime;
 
-// Configurações de Resiliência
+// ============================================================================
+// CONSTANTES DE ARQUITETURA E SEGURANÇA
+// ============================================================================
 const ALLOWED_COUNTRIES = new Set(['MX', 'CL', 'CO', 'PE']);
-const CONFIG_TTL_MS = 30_000; // Recarrega o config.json no máximo a cada 30s
-const GEO_TIMEOUT_MS = 1_200; // Cancela o lookup de IP se demorar mais de 1.2s
+const GEO_TIMEOUT_MS = 800;         // 800ms de Hard Timeout para API externa
+const GEO_CACHE_MAX_SIZE = 5_000;   // Máximo de IPs salvos no cache LRU em memória
+const GEO_CACHE_TTL_MS = 300_000;   // 5 minutos de cache por IP consultado
+const MAX_QUERY_PARAMS = 20;        // Limite contra sobrecarga de Query String
 
-// Estado em memória para alta performance
-let configState = {
-    data: null,
-    offersMap: new Map(),
-    lastLoadedAt: 0,
-    loadingPromise: null
-};
+// Regex para remover caracteres de controle ASCII (Prevenção de Header Injection / Cache Splitting)
+const CONTROL_CHARS_REGEX = /[\x00-\x1F\x7F]/g;
+
+// ============================================================================
+// 1. CONFIGURAÇÃO CARREGADA UMA VEZ POR INSTÂNCIA & LOOKUP POR MAP
+// ============================================================================
+const configPath = path.join(process.cwd(), 'config.json');
+let configPromise = null;
 
 /**
- * Carrega e indexa o config.json com proteção contra Race Conditions (Stampede)
- * e mantém a última versão válida caso o arquivo seja corrompido durante edição.
+ * O arquivo está incluído no pacote da função. Uma nova versão exige novo deploy.
  */
-async function getIndexedConfig() {
-    const now = Date.now();
+async function loadConfigFromDisk() {
+    const rawData = await fs.readFile(configPath, 'utf8');
+    const parsed = validateConfig(JSON.parse(rawData));
+    const whitePage = sanitizeBaseUrl(parsed.white_page);
+    if (!whitePage) throw new Error('URL de white_page inválida na configuração.');
 
-    // Retorna do cache se ainda estiver dentro do TTL
-    if (configState.data && (now - configState.lastLoadedAt < CONFIG_TTL_MS)) {
-        return configState;
+    const offersMap = new Map();
+    for (const offer of parsed.offers) {
+        if (offer.status !== 'active') continue;
+        const moneyUrl = sanitizeBaseUrl(offer.money_url);
+        if (!moneyUrl) throw new Error(`URL inválida para ad_id ${offer.ad_id}.`);
+        const adId = offer.ad_id.trim();
+        offersMap.set(adId, Object.freeze({
+            ad_id: adId,
+            money_url: moneyUrl,
+            status: 'active'
+        }));
     }
 
-    // Se já houver uma leitura de disco em andamento, aguarda a mesma Promise
-    if (configState.loadingPromise) {
-        return configState.loadingPromise;
+    return { whitePage, offersMap };
+}
+
+function getConfig() {
+    if (!configPromise) {
+        configPromise = loadConfigFromDisk().catch(error => {
+            configPromise = null;
+            console.error('[CONFIG_LOAD_ERROR]', { message: error.message });
+            throw error;
+        });
+    }
+    return configPromise;
+}
+
+// ============================================================================
+// 3. TIMEOUT ESTRITO COM ABORTCONTROLLER + CACHE LRU DE GEOLOCALIZAÇÃO
+// ============================================================================
+const geoCache = new Map(); // Funciona como LRU aproveitando a ordem de inserção do Map no JS
+const geoLookupsInFlight = new Map(); // Compartilha consultas simultâneas para o mesmo IP
+
+function getCachedCountry(ip) {
+    const entry = geoCache.get(ip);
+    if (!entry) return null;
+
+    if (Date.now() > entry.expiresAt) {
+        geoCache.delete(ip);
+        return null;
     }
 
-    configState.loadingPromise = (async () => {
-        try {
-            const filePath = path.join(process.cwd(), 'config.json');
-            const rawData = await fs.readFile(filePath, 'utf8');
-            const parsed = validateConfig(JSON.parse(rawData));
+    // Atualiza posição no LRU (remove e reinsere no final)
+    geoCache.delete(ip);
+    geoCache.set(ip, entry);
+    return entry.country;
+}
 
-            // Indexa ofertas ativas em um Map para busca O(1) instantânea
-            const newOffersMap = new Map();
-            if (Array.isArray(parsed.offers)) {
-                for (const offer of parsed.offers) {
-                    if (offer.status === 'active' && offer.ad_id && offer.money_url) {
-                        newOffersMap.set(String(offer.ad_id), offer);
-                    }
-                }
-            }
-
-            configState = {
-                data: parsed,
-                offersMap: newOffersMap,
-                lastLoadedAt: Date.now(),
-                loadingPromise: null
-            };
-            return configState;
-        } catch (err) {
-            configState.loadingPromise = null;
-            console.error('[CRITICAL] Falha ao recarregar config.json:', err.message);
-
-            // Resiliência: se já tínhamos um config válido antes, continua usando ele
-            if (configState.data) {
-                console.warn('[RECOVERY] Utilizando configuração anterior em cache.');
-                configState.lastLoadedAt = Date.now(); // Evita loop de leitura de disco
-                return configState;
-            }
-            throw err;
-        }
-    })();
-
-    return configState.loadingPromise;
+function setCachedCountry(ip, country) {
+    if (geoCache.size >= GEO_CACHE_MAX_SIZE) {
+        // Remove o item mais antigo (primeiro elemento do Map)
+        const oldestKey = geoCache.keys().next().value;
+        geoCache.delete(oldestKey);
+    }
+    geoCache.set(ip, {
+        country,
+        expiresAt: Date.now() + GEO_CACHE_TTL_MS
+    });
 }
 
 /**
- * Extrai, limpa e valida o endereço IP do cliente
+ * Executa a busca de país com AbortController real e Hard Timeout de 800ms
  */
-function extractCleanIp(req) {
-    let rawIp = '';
+async function fetchCountryWithAbort(ip, timeoutMs) {
+    const controller = new AbortController();
+    const { signal } = controller;
+    let timerId;
 
-    // Prioriza cabeçalhos de proxies reversos conhecidos, se presentes
-    const forwarded = req.headers['cf-connecting-ip'] 
-                   || req.headers['x-real-ip'] 
-                   || req.headers['x-forwarded-for'];
-
-    if (typeof forwarded === 'string' && forwarded.length > 0) {
-        rawIp = forwarded.split(',')[0].trim();
-    } else if (req.socket?.remoteAddress) {
-        rawIp = req.socket.remoteAddress;
-    }
-
-    // Remove prefixo IPv6-mapped IPv4 (ex: ::ffff:192.168.1.1 -> 192.168.1.1)
-    if (rawIp.startsWith('::ffff:')) {
-        rawIp = rawIp.slice(7);
-    }
-
-    // Remove porta caso o proxy envie no formato IPv4:Porta (ex: 200.10.20.30:44321)
-    if (rawIp.includes(':') && net.isIPv6(rawIp) === false) {
-        rawIp = rawIp.split(':')[0];
-    }
-
-    // Retorna o IP apenas se for sintaticamente válido (IPv4 ou IPv6)
-    return net.isIP(rawIp) !== 0 ? rawIp : null;
-}
-
-/**
- * Verifica se o IP pertence a redes locais/privadas (RFC 1918 / Loopback)
- */
-function isPrivateOrLocalIp(ip) {
-    if (!ip) return true;
-    if (ip === '127.0.0.1' || ip === '::1') return true;
-    return (
-        ip.startsWith('10.') ||
-        ip.startsWith('192.168.') ||
-        /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip) ||
-        ip.startsWith('fc00:') ||
-        ip.startsWith('fe80:')
-    );
-}
-
-/**
- * Executa o lookup de país com Timeout estrito para não travar a Event Loop
- */
-async function lookupCountryWithTimeout(ip, timeoutMs) {
-    let timer;
     const timeoutPromise = new Promise((_, reject) => {
-        timer = setTimeout(() => {
-            const err = new Error(`Geo lookup excedeu o limite de ${timeoutMs}ms`);
-            err.name = 'TimeoutError';
+        timerId = setTimeout(() => {
+            controller.abort(); // Envia sinal de aborto para a operação subjacente
+            const err = new Error(`GeoIP excedeu o limite estrito de ${timeoutMs}ms`);
+            err.name = 'AbortError';
             reject(err);
         }, timeoutMs);
     });
 
     try {
-        return await Promise.race([lookupCountry(ip), timeoutPromise]);
+        // O sinal cancela a consulta subjacente quando o limite é atingido.
+        const result = await Promise.race([
+            lookupCountry(ip, { signal }),
+            timeoutPromise
+        ]);
+
+        const normalized = typeof result === 'string' ? result.trim().toUpperCase() : '';
+        if (/^[A-Z]{2}$/.test(normalized)) {
+            setCachedCountry(ip, normalized);
+            return normalized;
+        }
+        return null;
     } finally {
-        clearTimeout(timer);
+        clearTimeout(timerId);
+    }
+}
+
+function resolveCountryWithAbort(ip, timeoutMs) {
+    const cached = getCachedCountry(ip);
+    if (cached) return Promise.resolve(cached);
+
+    const inFlight = geoLookupsInFlight.get(ip);
+    if (inFlight) return inFlight;
+
+    const pending = fetchCountryWithAbort(ip, timeoutMs);
+    geoLookupsInFlight.set(ip, pending);
+    const clearInFlight = () => {
+        if (geoLookupsInFlight.get(ip) === pending) {
+            geoLookupsInFlight.delete(ip);
+        }
+    };
+    void pending.then(clearInFlight, clearInFlight);
+    return pending;
+}
+
+// ============================================================================
+// 4. VALIDAÇÃO DE FORMATO DE IP E SANITIZAÇÃO RIGOROSA (IPv4 / IPv6 / RFCs)
+// ============================================================================
+function extractAndSanitizeIp(req) {
+    const headerCandidate = req.headers['cf-connecting-ip']
+                         || req.headers['x-real-ip']
+                         || req.headers['x-forwarded-for'];
+
+    let raw = '';
+    if (typeof headerCandidate === 'string' && headerCandidate.length > 0) {
+        raw = headerCandidate.split(',')[0].trim();
+    } else if (typeof req.socket?.remoteAddress === 'string') {
+        raw = req.socket.remoteAddress.trim();
+    }
+
+    if (!raw || raw.length > 64) return null;
+
+    // 1. Trata notação IPv6 com colchetes e porta: ex: [2001:db8::1]:44321 -> 2001:db8::1
+    if (raw.startsWith('[')) {
+        const closeBracketIdx = raw.indexOf(']');
+        if (closeBracketIdx === -1) return null;
+        raw = raw.slice(1, closeBracketIdx);
+    }
+
+    // 2. Remove Zone Index de IPv6 (ex: fe80::1%eth0 -> fe80::1)
+    const zoneIdx = raw.indexOf('%');
+    if (zoneIdx !== -1) {
+        raw = raw.slice(0, zoneIdx);
+    }
+
+    // 3. Converte IPv4 mapeado em IPv6 (ex: ::ffff:189.10.20.30 -> 189.10.20.30)
+    if (raw.toLowerCase().startsWith('::ffff:')) {
+        raw = raw.slice(7);
+    }
+
+    // 4. Remove porta acoplada em IPv4 (ex: 189.10.20.30:54321 -> 189.10.20.30)
+    // Se houver apenas um ':' na string, trata-se de IPv4:Porta (IPv6 possui no mínimo dois ':')
+    const firstColon = raw.indexOf(':');
+    if (firstColon !== -1 && raw.indexOf(':', firstColon + 1) === -1) {
+        raw = raw.slice(0, firstColon);
+    }
+
+    const ipVersion = net.isIP(raw);
+    if (ipVersion === 0) return null;
+
+    return { ip: raw, version: ipVersion };
+}
+
+/**
+ * Filtra IPs de Loopback, Redes Privadas (RFC 1918), CGNAT (RFC 6598) e Link-Local
+ */
+function isReservedOrPrivateIp({ ip, version }) {
+    if (version === 4) {
+        const parts = ip.split('.').map(Number);
+        const [a, b] = parts;
+
+        if (a === 10) return true;                          // 10.0.0.0/8 (Privado)
+        if (a === 127) return true;                         // 127.0.0.0/8 (Loopback)
+        if (a === 0) return true;                           // 0.0.0.0/8 (Rede local)
+        if (a === 169 && b === 254) return true;            // 169.254.0.0/16 (Link-Local)
+        if (a === 172 && b >= 16 && b <= 31) return true;   // 172.16.0.0/12 (Privado)
+        if (a === 192 && b === 168) return true;            // 192.168.0.0/16 (Privado)
+        if (a === 100 && b >= 64 && b <= 127) return true;  // 100.64.0.0/10 (Carrier-Grade NAT)
+        return false;
+    }
+
+    if (version === 6) {
+        const normalized = ip.toLowerCase();
+        if (normalized === '::1' || normalized === '::') return true;
+        if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true; // Unique Local (RFC 4193)
+        if (/^fe[89ab]/.test(normalized)) return true; // Link-Local (fe80::/10)
+        return false;
+    }
+
+    return true;
+}
+
+// ============================================================================
+// 5. PREVENÇÃO DE CACHE SPLITTING, HPP E SANITIZAÇÃO DE URL
+// ============================================================================
+function sanitizeBaseUrl(urlString) {
+    if (typeof urlString !== 'string') return null;
+    const cleaned = urlString.replace(CONTROL_CHARS_REGEX, '').trim();
+    try {
+        const parsed = new URL(cleaned);
+        // Impede esquemas perigosos como javascript:, data:, file:
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            return null;
+        }
+        return parsed.toString();
+    } catch {
+        return null;
     }
 }
 
 /**
- * Anexa parâmetros de campanha (UTMs, subids) com segurança na URL de destino
+ * Mescla Query Strings protegendo contra HTTP Parameter Pollution (HPP) e CRLF Injection
  */
-function buildDestinationUrl(baseUrl, queryObj) {
+function buildSafeRedirectUrl(baseUrl, queryObj) {
     try {
-        const target = new URL(baseUrl);
-        for (const [key, value] of Object.entries(queryObj)) {
-            if (key === 'ad_id') continue;
-            if (typeof value === 'string' && value.length <= 256) {
-                target.searchParams.set(key, value);
+        const targetUrl = new URL(baseUrl);
+        if (!queryObj || typeof queryObj !== 'object') {
+            return targetUrl.toString();
+        }
+
+        let paramCount = 0;
+        for (const [rawKey, rawVal] of Object.entries(queryObj)) {
+            if (paramCount >= MAX_QUERY_PARAMS) break;
+            if (rawKey === 'ad_id') continue;
+
+            // Prevenção de HPP: se o parâmetro vier duplicado (Array), pega apenas o primeiro valor
+            const singleVal = Array.isArray(rawVal) ? rawVal[0] : rawVal;
+            if (typeof singleVal !== 'string') continue;
+
+            // Remove caracteres de controle (\r, \n, \0) que causam HTTP Response/Cache Splitting
+            const safeKey = rawKey.replace(CONTROL_CHARS_REGEX, '').trim();
+            const safeVal = singleVal.replace(CONTROL_CHARS_REGEX, '').trim();
+
+            if (safeKey.length > 0 && safeKey.length <= 64 && safeVal.length <= 256) {
+                targetUrl.searchParams.set(safeKey, safeVal);
+                paramCount++;
             }
         }
-        return target.toString();
+
+        return targetUrl.toString();
     } catch {
         return baseUrl;
     }
 }
 
+// ============================================================================
+// HANDLER PRINCIPAL DA ROTA
+// ============================================================================
 export default async function handler(req, res) {
-    // 1. Filtra métodos HTTP desnecessários logo na entrada
+    // 1. Rejeição imediata de métodos HTTP inválidos (Prevenção de abuso e Cache Poisoning)
     if (req.method !== 'GET' && req.method !== 'HEAD') {
         res.setHeader('Allow', 'GET, HEAD');
-        return res.status(405).end();
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(405).send('Method Not Allowed');
     }
 
-    // 2. Cabeçalhos de segurança e controle estrito de cache
+    // 2. Cabeçalhos estritos contra Cache Splitting e armazenamento indevido em Proxies/CDNs
     res.setHeader('Cache-Control', 'private, no-cache, no-store, max-age=0, must-revalidate');
+    res.setHeader('CDN-Cache-Control', 'no-store');
     res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
 
-    // 3. Carregamento resiliente de configuração
-    let state;
+    // 3. Obtém a configuração empacotada neste deploy
+    let store;
     try {
-        state = await getIndexedConfig();
+        store = await getConfig();
     } catch {
-        return res.status(500).send('Service Configuration Error');
+        return res.status(500).send('Internal Configuration Error');
     }
 
-    const fallbackUrl = state.data.white_page;
-    const adId = typeof req.query?.ad_id === 'string' ? req.query.ad_id.trim() : null;
+    const fallbackUrl = store.whitePage;
 
-    // 4. Short-circuit: se não há ad_id válido ou a oferta não está ativa, nem gasta CPU/Rede consultando IP
-    if (!adId || !state.offersMap.has(adId)) {
+    // 4. Sanitização do parâmetro ad_id (protegido contra Array Injection / HPP)
+    const rawAdId = Array.isArray(req.query?.ad_id) ? req.query.ad_id[0] : req.query?.ad_id;
+    const adId = typeof rawAdId === 'string'
+        ? rawAdId.replace(CONTROL_CHARS_REGEX, '').trim()
+        : null;
+
+    // 5. Lookup O(1) imediato: se o ad_id não existir ou estiver inativo, encerra antes do GeoIP
+    if (!adId || !store.offersMap.has(adId)) {
         return res.redirect(302, fallbackUrl);
     }
 
-    // 5. Extração e validação de IP
-    const clientIp = extractCleanIp(req);
-    if (isPrivateOrLocalIp(clientIp)) {
+    // 6. Extração, limpeza e validação RFC do endereço IP
+    const parsedIp = extractAndSanitizeIp(req);
+    if (!parsedIp || isReservedOrPrivateIp(parsedIp)) {
         return res.redirect(302, fallbackUrl);
     }
 
-    // 6. Consulta de Geolocalização protegida por Timeout
+    // 7. Consulta externa protegida por AbortController (Hard Timeout de 800ms) + Cache LRU
     const lookupStartedAt = performance.now();
     try {
-        const countryCode = await lookupCountryWithTimeout(clientIp, GEO_TIMEOUT_MS);
-        const normalizedCountry = typeof countryCode === 'string' ? countryCode.toUpperCase() : '';
+        const countryCode = await resolveCountryWithAbort(parsedIp.ip, GEO_TIMEOUT_MS);
 
-        if (ALLOWED_COUNTRIES.has(normalizedCountry)) {
-            const offer = state.offersMap.get(adId);
-            const finalUrl = buildDestinationUrl(offer.money_url, req.query);
-            return res.redirect(302, finalUrl);
+        if (countryCode && ALLOWED_COUNTRIES.has(countryCode)) {
+            const offer = store.offersMap.get(adId);
+            const destinationUrl = buildSafeRedirectUrl(offer.money_url, req.query);
+            return res.redirect(302, destinationUrl);
         }
     } catch (error) {
         const durationMs = Math.round(performance.now() - lookupStartedAt);
-        console.error('[GEO_LOOKUP_FAIL]', {
-            type: error.name,
+        console.error('[GEO_LOOKUP_FAILURE]', {
+            name: error.name,
             message: error.message,
-            ip: clientIp,
             duration_ms: durationMs
         });
 
-        // Graceful Degradation: Em produção, se a API de GeoIP falhar ou der timeout,
-        // redireciona para a página padrão em vez de exibir tela de erro 503 ao usuário.
-        return res.redirect(302, fallbackUrl);
+        return res.status(503).send('Consulta de localização temporariamente indisponível.');
     }
 
     return res.redirect(302, fallbackUrl);
-}
-
-/**
- * Checagens extras de contradição para adicionar dentro de evaluateClientAuthenticity(req)
- */
-
-// 7. Contradição Safari/iOS vs. Client Hints do Chromium:
-// Navegadores Safari (iPhone/Mac) e Firefox NÃO enviam cabeçalhos 'sec-ch-ua'.
-// Se o User-Agent finge ser um iPhone (Safari) ou Firefox, mas a requisição contém 'sec-ch-ua',
-// prova-se que é um bot baseado em Chromium (Puppeteer/Playwright) com User-Agent falsificado!
-const claimsSafariOrFirefox = (/iphone|ipad|macintosh/i.test(ua) && !/chrome|crios|edg/i.test(ua)) || /firefox\//i.test(ua);
-if (claimsSafariOrFirefox && (h['sec-ch-ua'] || h['sec-ch-ua-platform'] || h['sec-ch-ua-mobile'])) {
-    return { passed: false, reason: 'TLS_CLIENT_HINTS_UA_CONTRADICTION' };
-}
-
-// 8. Contradição de Plataforma (OS Spoofing):
-// Se o cabeçalho nativo Sec-CH-UA-Platform diz "Linux" ou "Windows", mas o User-Agent diz "Android" ou "iPhone"
-const chPlatform = typeof h['sec-ch-ua-platform'] === 'string' ? h['sec-ch-ua-platform'].toLowerCase() : '';
-if (chPlatform) {
-    if (chPlatform.includes('linux') && /windows|macintosh|iphone/i.test(ua)) {
-        return { passed: false, reason: 'PLATFORM_HEADER_CONTRADICTION' };
-    }
-    if (chPlatform.includes('windows') && /android|iphone|ipad|linux/i.test(ua)) {
-        return { passed: false, reason: 'PLATFORM_HEADER_CONTRADICTION' };
-    }
-}
-
-// Adicione no final do seu arquivo handler.js (logo após a função handler):
-
-// Permite injetar mocks durante os testes unitários sem afetar a produção
-export function __resetForTests(overrides = {}) {
-    configStore.whitePage = null;
-    configStore.offersMap.clear();
-    configStore.lastCheckedAt = 0;
-    configStore.lastMtimeMs = 0;
-    configStore.revalidatingPromise = null;
-    geoCache.clear();
-
-    if (overrides.lookupCountry) {
-        lookupCountry = overrides.lookupCountry;
-    }
-    if (overrides.configPath) {
-        configPath = overrides.configPath;
-    }
 }

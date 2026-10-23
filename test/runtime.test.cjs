@@ -53,3 +53,24 @@ test('interrompe uma consulta que excede o tempo limite', async () => {
         { name: 'AbortError' }
     );
 });
+
+test('propaga cancelamento externo para a consulta', async () => {
+    const controller = new AbortController();
+    let receivedSignal;
+    const fetchImpl = (_url, { signal }) => new Promise((resolve, reject) => {
+        receivedSignal = signal;
+        signal.addEventListener('abort', () => {
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        }, { once: true });
+    });
+
+    const pending = lookupCountry('203.0.113.10', {
+        fetchImpl,
+        signal: controller.signal,
+        timeoutMs: 1000
+    });
+    controller.abort();
+
+    await assert.rejects(pending, { name: 'AbortError' });
+    assert.equal(receivedSignal.aborted, true);
+});
