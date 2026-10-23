@@ -1,10 +1,14 @@
 const fs = require('fs');
 
+const path = require('path');
+
 export default async function handler(req, res) {
     // Carrega as configurações do arquivo config.json
     let config;
     try {
-        config = JSON.parse(fs.readFileSync('./config.json', 'utf8'));
+        config = JSON.parse(
+    fs.readFileSync(path.join(process.cwd(), 'config.json'), 'utf8')
+);
     } catch (e) {
         console.error('CONFIG_LOAD_ERROR', e);
         return res.status(500).send("Erro ao carregar configurações.");
