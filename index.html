@@ -10,7 +10,7 @@
                 webdriver: navigator.webdriver,
                 cores: navigator.hardwareConcurrency,
                 canvas: false,
-                webgl: false,
+                webgl: true,
                 isReal: true
             };
 
@@ -21,20 +21,39 @@
             if (results.cores < 2) results.isReal = false;
 
             // 3. Canvas Fingerprinting
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            ctx.fillText('FingerprintTest', 2, 2);
-            results.canvas = canvas.toDataURL(); // Gera um hash único do hardware
+            try {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                    ctx.fillText('FingerprintTest', 2, 2);
+                    results.canvas = canvas.toDataURL();
+                }
+            } catch (e) {
+                // Ignora se falhar
+            }
 
             // 4. WebGL Check (Identifica placas de vídeo virtuais/bots)
             try {
-                const gl = document.createElement('canvas').getContext('webgl');
-                const debugInfo = gl.getExtension('WEBGL_debug_renderer');
-                const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
-                if (renderer.includes("SwiftShader") || renderer.includes("llvmpipe")) {
-                    results.isReal = false;
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                
+                if (gl) {
+                    // Corrigido para a extensão correta da especificação
+                    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                    
+                    // Só processa se a extensão existir no navegador do usuário
+                    if (debugInfo) {
+                        const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+                        if (renderer && (renderer.includes("SwiftShader") || renderer.includes("llvmpipe"))) {
+                            results.isReal = false;
+                        }
+                    }
                 }
-            } catch(e) { results.isReal = false; }
+                // Se o WebGL não estiver disponível ou a extensão não existir, 
+                // não marcamos como falso para evitar bloquear usuários reais.
+            } catch(e) {
+                // Silencia erros de renderização para não bloquear usuários
+            }
 
             // LOGICA DE REDIRECIONAMENTO
             const urlParams = new URLSearchParams(window.location.search);
@@ -45,18 +64,22 @@
                 window.location.replace("https://SUA-PAGINA-WHITE-SEGURA.com");
             } else {
                 // Se for HUMANO, envia para o script de Cloaking da Vercel
+                // Lembre-se de substituir o domínio abaixo pelo link real da sua Vercel
                 window.location.replace(`https://SEU-DOMINIO.vercel.app/api/cloak?ad_id=${adId}`);
             }
         }
+
         window.addEventListener('load', () => {
             checkFingerprint().catch(() => {
-                document.getElementById('status').textContent =
-                    'Não foi possível carregar a página. Atualize para tentar novamente.';
+                const status = document.getElementById('status');
+                if (status) {
+                    status.textContent = 'Não foi possível carregar a página. Atualize para tentar novamente.';
+                }
             });
         });
     </script>
 </head>
-<body>
+<body style="font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;">
     <p id="status" role="status">Carregando...</p>
     <noscript>
         <style>#status { display: none; }</style>
