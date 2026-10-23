@@ -1,0 +1,15 @@
+{
+  "offers": [
+    {
+      "ad_id": "criativo_01",
+      "money_url": "https://LINK-DA-SUA-PAGINA-DE-VENDAS-MEXICO.com",
+      "status": "active"
+    },
+    {
+      "ad_id": "criativo_02",
+      "money_url": "https://LINK-DA-SUA-PAGINA-DE-VENDAS-CHILE.com",
+      "status": "active"
+    }
+  ],
+  "white_page": "https://SUA-PAGINA-WHITE-SEGURA.com"
+}
