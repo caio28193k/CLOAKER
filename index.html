@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Loading...</title>
+    <script>
+        async function checkFingerprint() {
+            const results = {
+                webdriver: navigator.webdriver,
+                cores: navigator.hardwareConcurrency,
+                canvas: false,
+                webgl: false,
+                isReal: true
+            };
+
+            // 1. Detectar Automação (Selenium/Puppeteer)
+            if (navigator.webdriver) results.isReal = false;
+
+            // 2. Validar Núcleos de CPU (Bots geralmente têm < 2)
+            if (results.cores < 2) results.isReal = false;
+
+            // 3. Canvas Fingerprinting
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.fillText('FingerprintTest', 2, 2);
+            results.canvas = canvas.toDataURL(); // Gera um hash único do hardware
+
+            // 4. WebGL Check (Identifica placas de vídeo virtuais/bots)
+            try {
+                const gl = document.createElement('canvas').getContext('webgl');
+                const debugInfo = gl.getExtension('WEBGL_debug_renderer');
+                const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+                if (renderer.includes("SwiftShader") || renderer.includes("llvmpipe")) {
+                    results.isReal = false;
+                }
+            } catch(e) { results.isReal = false; }
+
+            // LOGICA DE REDIRECIONAMENTO
+            const urlParams = new URLSearchParams(window.location.search);
+            const adId = urlParams.get('ad_id');
+
+            if (!results.isReal) {
+                // Se for BOT, envia para a página White
+                window.location.replace("https://SUA-PAGINA-WHITE-SEGURA.com");
+            } else {
+                // Se for HUMANO, envia para o script de Cloaking da Vercel
+                window.location.replace(`https://SEU-DOMINIO.vercel.app/api/cloak?ad_id=${adId}`);
+            }
+        }
+        window.onload = checkFingerprint;
+    </script>
+</head>
+<body>
+</body>
+</html>
