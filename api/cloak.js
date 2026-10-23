@@ -221,3 +221,47 @@ export default async function handler(req, res) {
 
     return res.redirect(302, fallbackUrl);
 }
+
+/**
+ * Checagens extras de contradição para adicionar dentro de evaluateClientAuthenticity(req)
+ */
+
+// 7. Contradição Safari/iOS vs. Client Hints do Chromium:
+// Navegadores Safari (iPhone/Mac) e Firefox NÃO enviam cabeçalhos 'sec-ch-ua'.
+// Se o User-Agent finge ser um iPhone (Safari) ou Firefox, mas a requisição contém 'sec-ch-ua',
+// prova-se que é um bot baseado em Chromium (Puppeteer/Playwright) com User-Agent falsificado!
+const claimsSafariOrFirefox = (/iphone|ipad|macintosh/i.test(ua) && !/chrome|crios|edg/i.test(ua)) || /firefox\//i.test(ua);
+if (claimsSafariOrFirefox && (h['sec-ch-ua'] || h['sec-ch-ua-platform'] || h['sec-ch-ua-mobile'])) {
+    return { passed: false, reason: 'TLS_CLIENT_HINTS_UA_CONTRADICTION' };
+}
+
+// 8. Contradição de Plataforma (OS Spoofing):
+// Se o cabeçalho nativo Sec-CH-UA-Platform diz "Linux" ou "Windows", mas o User-Agent diz "Android" ou "iPhone"
+const chPlatform = typeof h['sec-ch-ua-platform'] === 'string' ? h['sec-ch-ua-platform'].toLowerCase() : '';
+if (chPlatform) {
+    if (chPlatform.includes('linux') && /windows|macintosh|iphone/i.test(ua)) {
+        return { passed: false, reason: 'PLATFORM_HEADER_CONTRADICTION' };
+    }
+    if (chPlatform.includes('windows') && /android|iphone|ipad|linux/i.test(ua)) {
+        return { passed: false, reason: 'PLATFORM_HEADER_CONTRADICTION' };
+    }
+}
+
+// Adicione no final do seu arquivo handler.js (logo após a função handler):
+
+// Permite injetar mocks durante os testes unitários sem afetar a produção
+export function __resetForTests(overrides = {}) {
+    configStore.whitePage = null;
+    configStore.offersMap.clear();
+    configStore.lastCheckedAt = 0;
+    configStore.lastMtimeMs = 0;
+    configStore.revalidatingPromise = null;
+    geoCache.clear();
+
+    if (overrides.lookupCountry) {
+        lookupCountry = overrides.lookupCountry;
+    }
+    if (overrides.configPath) {
+        configPath = overrides.configPath;
+    }
+}
