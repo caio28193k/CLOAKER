@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/cloak.js": {
+      "includeFiles": "config.json"
+    }
+  }
+}
