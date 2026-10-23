@@ -2,6 +2,6 @@
   "name": "advanced-cloaker",
   "version": "1.0.0",
   "dependencies": {
-    "geoip-lite": "^1.9.0"
+    "geoip-lite": "1.9.0"
   }
 }
