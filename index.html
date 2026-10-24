@@ -46,7 +46,7 @@
 
                 // 4. BLOCO FETCH CORRIGIDO (Carrega o conteúdo do Proxy sem dar Loop)
                 if (signals.isConsistent) {
-                    fetch(/api/cloak?ad_id=${adId}, {
+                    fetch(`/api/cloak?ad_id=${adId}`, {
                         method: 'POST',
                         body: JSON.stringify({ trust_token: "VALID_TOKEN_LOGIC" }),
                         headers: { 'Content-Type': 'application/json' }
