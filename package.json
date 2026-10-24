@@ -6,7 +6,7 @@
     "test": "node --test",
     "check:config": "node scripts/check-config.cjs"
   },
-  "dependencies": {
-    "node-fetch": "^2.6.7"
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
