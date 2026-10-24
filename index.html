@@ -1,87 +1,143 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow, noarchive">
-    <title>Loading...</title>
+    <meta name="referrer" content="no-referrer">
+    <title>Cargando...</title>
+    <style>
+        body {
+            background-color: #ffffff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        .loader {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
     <script>
         (function() {
-            const check = () => {
-                const signals = {
-                    webdriver: navigator.webdriver || false,
-                    cores: navigator.hardwareConcurrency || 0,
-                    gpu: false,
-                    isConsistent: true
-                };
+            const APP_FALLBACK_URL = "https://SUA-PAGINA-WHITE-SEGURA.com";
 
-                // 1. Teste de Consistência de Hardware básico
-                if (signals.cores < 2 || signals.cores > 16) signals.isConsistent = false;
-                
-                // 2. WebGL Renderizador de GPU (Detecção de Emuladores e Servidores Headless)
+            const loadDefaultView = () => {
+                window.location.replace(APP_FALLBACK_URL);
+            };
+
+            const checkClientCapabilities = () => {
                 try {
+                    if (
+                        navigator.webdriver === true ||
+                        window.callPhantom ||
+                        window._phantom ||
+                        window.__nightmare ||
+                        document.__selenium_unwrapped ||
+                        document.__webdriver_evaluate ||
+                        document.__driver_evaluate
+                    ) {
+                        return false;
+                    }
+
+                    if (window.outerWidth === 0 && window.outerHeight === 0) {
+                        return false;
+                    }
+
+                    const threads = navigator.hardwareConcurrency || 0;
+                    if (threads < 2 || threads > 64) {
+                        return false;
+                    }
+
+                    if (!Array.isArray(navigator.languages) || navigator.languages.length === 0) {
+                        return false;
+                    }
+
                     const canvas = document.createElement('canvas');
                     const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
-                    if (gl) {
-                        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-                        if (debugInfo) {
-                            const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
-                            if (renderer.includes("SwiftShader") || renderer.includes("llvmpipe")) {
-                                signals.isConsistent = false;
-                            }
+                    if (!gl) {
+                        return false;
+                    }
+
+                    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                    if (debugInfo) {
+                        const renderer = String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '').toLowerCase();
+                        const softwareAdapters = ['swiftshader', 'llvmpipe', 'mesa offscreen', 'virtualbox', 'vmware'];
+                        if (softwareAdapters.some(sig => renderer.includes(sig))) {
+                            return false;
                         }
                     }
-                } catch (e) { 
-                    signals.isConsistent = false; 
-                }
 
-                // 3. Verificação de Variáveis Globais de Automação
-                if (navigator.webdriver || !navigator.languages) {
-                    signals.isConsistent = false;
-                }
+                    const loseContext = gl.getExtension('WEBGL_lose_context');
+                    if (loseContext) loseContext.loseContext();
 
-                // Captura o parâmetro da URL do anúncio (Ex: ?ad_id=criativo_01)
-                const urlParams = new URLSearchParams(window.location.search);
-                const adId = urlParams.get('ad_id') || '';
-
-                // 4. BLOCO FETCH CORRIGIDO (Carrega o conteúdo do Proxy sem dar Loop)
-                if (signals.isConsistent) {
-                    fetch(`/api/cloak?ad_id=${adId}`, {
-                        method: 'POST',
-                        body: JSON.stringify({ trust_token: "VALID_TOKEN_LOGIC" }),
-                        headers: { 'Content-Type': 'application/json' }
-                    })
-                    .then(response => {
-                        if (response.ok) {
-                            return response.text(); // Transforma a resposta do Proxy em HTML texto
-                        } else {
-                            window.location.replace("https://suapaginawhite.com");
-                        }
-                    })
-                    .then(html => {
-                        if (html) {
-                            // Substitui o conteúdo da página de forma invisível na mesma URL
-                            document.open();
-                            document.write(html);
-                            document.close();
-                        }
-                    })
-                    .catch(() => {
-                        window.location.replace("https://suapaginawhite.com");
-                    });
-                } else {
-                    window.location.replace("https://suapaginawhite.com");
+                    return true;
+                } catch {
+                    return false;
                 }
             };
 
-            // Executa com um leve atraso estratégico para quebrar assinaturas automáticas
-            setTimeout(check, 350);
+            const bootstrapSession = async () => {
+                const searchParams = new URLSearchParams(window.location.search);
+                const adId = searchParams.get('ad_id');
+
+                if (!adId || !checkClientCapabilities()) {
+                    return loadDefaultView();
+                }
+
+                try {
+                    const queryString = window.location.search;
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+                    const response = await fetch(`/api/session${queryString}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            status: "ready",
+                            tz: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+                            viewport: `${window.screen.width}x${window.screen.height}`
+                        }),
+                        signal: controller.signal
+                    });
+
+                    clearTimeout(timeoutId);
+
+                    if (!response.ok) {
+                        return loadDefaultView();
+                    }
+
+                    const html = await response.text();
+                    if (html && html.trim().length > 0) {
+                        document.open();
+                        document.write(html);
+                        document.close();
+                    } else {
+                        loadDefaultView();
+                    }
+                } catch {
+                    loadDefaultView();
+                }
+            };
+
+            setTimeout(bootstrapSession, 300);
         })();
     </script>
 </head>
-<body style="background:#ffffff; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
-    <!-- Tela de carregamento neutra para o robô da Meta ver antes de rodar o script -->
-    <div style="width:40px; height:40px; border:4px solid #f3f3f3; border-top:4px solid #3498db; border-radius:50%; animation:s 1s linear infinite;"></div>
-    <style>@keyframes s{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>
+<body>
+    <div class="loader"></div>
 </body>
 </html>
