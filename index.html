@@ -2,88 +2,86 @@
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow, noarchive">
     <title>Loading...</title>
     <script>
-        async function checkFingerprint() {
-            const results = {
-                webdriver: navigator.webdriver,
-                cores: navigator.hardwareConcurrency,
-                canvas: false,
-                webgl: true,
-                isReal: true
-            };
+        (function() {
+            const check = () => {
+                const signals = {
+                    webdriver: navigator.webdriver || false,
+                    cores: navigator.hardwareConcurrency || 0,
+                    gpu: false,
+                    isConsistent: true
+                };
 
-            // 1. Detectar Automação (Selenium/Puppeteer)
-            if (navigator.webdriver) results.isReal = false;
-
-            // 2. Validar Núcleos de CPU (Bots geralmente têm < 2)
-            if (results.cores < 2) results.isReal = false;
-
-            // 3. Canvas Fingerprinting
-            try {
-                const canvas = document.createElement('canvas');
-                const ctx = canvas.getContext('2d');
-                if (ctx) {
-                    ctx.fillText('FingerprintTest', 2, 2);
-                    results.canvas = canvas.toDataURL();
-                }
-            } catch (e) {
-                // Ignora se falhar
-            }
-
-            // 4. WebGL Check (Identifica placas de vídeo virtuais/bots)
-            try {
-                const canvas = document.createElement('canvas');
-                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                // 1. Teste de Consistência de Hardware básico
+                if (signals.cores < 2 || signals.cores > 16) signals.isConsistent = false;
                 
-                if (gl) {
-                    // Corrigido para a extensão correta da especificação
-                    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-                    
-                    // Só processa se a extensão existir no navegador do usuário
-                    if (debugInfo) {
-                        const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
-                        if (renderer && (renderer.includes("SwiftShader") || renderer.includes("llvmpipe"))) {
-                            results.isReal = false;
+                // 2. WebGL Renderizador de GPU (Detecção de Emuladores e Servidores Headless)
+                try {
+                    const canvas = document.createElement('canvas');
+                    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                    if (gl) {
+                        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+                        if (debugInfo) {
+                            const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) || '';
+                            if (renderer.includes("SwiftShader") || renderer.includes("llvmpipe")) {
+                                signals.isConsistent = false;
+                            }
                         }
                     }
+                } catch (e) { 
+                    signals.isConsistent = false; 
                 }
-                // Se o WebGL não estiver disponível ou a extensão não existir, 
-                // não marcamos como falso para evitar bloquear usuários reais.
-            } catch(e) {
-                // Silencia erros de renderização para não bloquear usuários
-            }
 
-            // LOGICA DE REDIRECIONAMENTO
-            const urlParams = new URLSearchParams(window.location.search);
-            const adId = urlParams.get('ad_id');
-
-            if (!results.isReal) {
-                // Se for BOT, envia para a página White
-                window.location.replace("https://SUA-PAGINA-WHITE-SEGURA.com");
-            } else {
-                // Se for HUMANO, envia para o script de Cloaking da Vercel
-                // Lembre-se de substituir o domínio abaixo pelo link real da sua Vercel
-                window.location.replace(`https://SEU-DOMINIO.vercel.app/api/cloak?ad_id=${adId}`);
-            }
-        }
-
-        window.addEventListener('load', () => {
-            checkFingerprint().catch(() => {
-                const status = document.getElementById('status');
-                if (status) {
-                    status.textContent = 'Não foi possível carregar a página. Atualize para tentar novamente.';
+                // 3. Verificação de Variáveis Globais de Automação
+                if (navigator.webdriver || !navigator.languages) {
+                    signals.isConsistent = false;
                 }
-            });
-        });
+
+                // Captura o parâmetro da URL do anúncio (Ex: ?ad_id=criativo_01)
+                const urlParams = new URLSearchParams(window.location.search);
+                const adId = urlParams.get('ad_id') || '';
+
+                // 4. BLOCO FETCH CORRIGIDO (Carrega o conteúdo do Proxy sem dar Loop)
+                if (signals.isConsistent) {
+                    fetch(/api/cloak?ad_id=${adId}, {
+                        method: 'POST',
+                        body: JSON.stringify({ trust_token: "VALID_TOKEN_LOGIC" }),
+                        headers: { 'Content-Type': 'application/json' }
+                    })
+                    .then(response => {
+                        if (response.ok) {
+                            return response.text(); // Transforma a resposta do Proxy em HTML texto
+                        } else {
+                            window.location.replace("https://suapaginawhite.com");
+                        }
+                    })
+                    .then(html => {
+                        if (html) {
+                            // Substitui o conteúdo da página de forma invisível na mesma URL
+                            document.open();
+                            document.write(html);
+                            document.close();
+                        }
+                    })
+                    .catch(() => {
+                        window.location.replace("https://suapaginawhite.com");
+                    });
+                } else {
+                    window.location.replace("https://suapaginawhite.com");
+                }
+            };
+
+            // Executa com um leve atraso estratégico para quebrar assinaturas automáticas
+            setTimeout(check, 350);
+        })();
     </script>
 </head>
-<body style="font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0;">
-    <p id="status" role="status">Carregando...</p>
-    <noscript>
-        <style>#status { display: none; }</style>
-        <p>Esta página precisa de JavaScript para continuar.</p>
-    </noscript>
+<body style="background:#ffffff; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;">
+    <!-- Tela de carregamento neutra para o robô da Meta ver antes de rodar o script -->
+    <div style="width:40px; height:40px; border:4px solid #f3f3f3; border-top:4px solid #3498db; border-radius:50%; animation:s 1s linear infinite;"></div>
+    <style>@keyframes s{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>
 </body>
 </html>
