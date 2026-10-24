@@ -1,7 +1,7 @@
 {
   "functions": {
-    "api/cloak.js": {
-      "includeFiles": "config.json"
+    "api/session.js": {
+      "maxDuration": 10
     }
   }
 }
